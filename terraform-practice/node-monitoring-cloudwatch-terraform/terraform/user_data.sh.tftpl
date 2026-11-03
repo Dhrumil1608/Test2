@@ -1,0 +1,77 @@
+
+#!/bin/bash
+set -euxo pipefail
+
+exec > >(tee -a /var/log/node-monitoring-bootstrap.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+export DEBIAN_FRONTEND=noninteractive
+
+# Update Ubuntu packages
+apt-get update -y
+apt-get install -y curl wget ca-certificates
+
+# Install Node.js 20
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs
+
+# Create application directories
+mkdir -p /opt/nodeapp
+mkdir -p /var/log/nodeapp
+
+# Copy application files
+echo '${app_server_js_b64}' | base64 -d > /opt/nodeapp/server.js
+echo '${app_package_b64}' | base64 -d > /opt/nodeapp/package.json
+
+# Set application and log directory permissions
+chown -R ubuntu:ubuntu /opt/nodeapp
+chown ubuntu:ubuntu /var/log/nodeapp
+chmod 755 /opt/nodeapp
+chmod 755 /var/log/nodeapp
+
+# Create systemd service
+cat > /etc/systemd/system/node-monitoring-app.service <<'SERVICE'
+[Unit]
+Description=Node Monitoring Application
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/nodeapp
+Environment=PORT=3000
+Environment=LOG_DIR=/var/log/nodeapp
+ExecStart=/usr/bin/node /opt/nodeapp/server.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+# Enable and start Node.js application
+systemctl daemon-reload
+systemctl enable node-monitoring-app
+systemctl start node-monitoring-app
+
+# Install CloudWatch Agent
+cd /tmp
+
+wget -q https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+
+dpkg -i -E ./amazon-cloudwatch-agent.deb
+
+# Install CloudWatch Agent configuration
+mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+
+echo '${agent_config_b64}' | base64 -d > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+
+# Start CloudWatch Agent
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config \
+  -m ec2 \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+  -s
+
+systemctl enable amazon-cloudwatch-agent
+
+echo "Installation completed"
